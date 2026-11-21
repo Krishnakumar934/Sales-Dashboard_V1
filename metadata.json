@@ -1,0 +1,6 @@
+{
+  "name": "PulseGrid Mobile Data Studio",
+  "description": "Mobile data visualization and aggregation dashboard powered by Google Drive Excel files with custom month ranges and interactive analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
