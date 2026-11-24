@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { MotionConfig, AnimatePresence, motion } from 'motion/react';
 import type { Dataset, AggregationConfig, DateRangeFilter } from './types/data.ts';
-import { SAMPLE_DATASETS } from './utils/sampleData.ts';
 import {
   filterRowsByDate,
   filterRowsByFacetAndSearch,
@@ -34,6 +33,9 @@ import { AISalesAdvisor } from './components/AISalesAdvisor.tsx';
 import { DataSourceModal } from './components/DataSourceModal.tsx';
 import { BottomNav, ActiveTab } from './components/BottomNav.tsx';
 import { DashboardSkeleton } from './components/DashboardSkeleton.tsx';
+import { OfflineIndicator } from './components/OfflineIndicator.tsx';
+import { SyncProgressBanner } from './components/SyncProgressBanner.tsx';
+import { ComparisonPanel } from './components/ComparisonPanel.tsx';
 import { buildSalesAnalyticsSnapshot } from './utils/forecasting.ts';
 import { Calendar, X, RefreshCw, Link2, AlertCircle, BarChart3, Landmark } from 'lucide-react';
 import {
@@ -43,17 +45,38 @@ import {
   loadSavedMainSheetUrl,
   saveCachedDefaultSheetDatasets,
   saveMainSheetUrl,
+  type SheetSyncStage,
 } from './utils/googleSheets.ts';
 import { loadWorkbookFromIDB, saveWorkbookToIDB } from './utils/sheetCache.ts';
 
+const EMPTY_WORKBOOK_PLACEHOLDER: Dataset = {
+  id: 'loading-workbook',
+  name: 'Main Operations Sheet',
+  description: 'Connecting to live Google Drive workbook...',
+  sheetNames: [],
+  activeSheet: '',
+  rows: [],
+  columns: [],
+  defaultDateCol: '',
+  defaultMetricCol: 'Amount',
+  defaultDimCol: '',
+};
+
 export default function App() {
-  const initialCache = useMemo(() => loadCachedDefaultSheetDatasets(), []);
+  const initialCache = useMemo(() => {
+    const cached = loadCachedDefaultSheetDatasets();
+    if (!cached?.datasets) return null;
+    const realOnly = cached.datasets.filter(
+      (d) => !d.id.startsWith('sample-') && d.rows && d.rows.length > 0
+    );
+    return realOnly.length > 0 ? { datasets: realOnly, syncedAt: cached.syncedAt } : null;
+  }, []);
 
   const [datasets, setDatasets] = useState<Dataset[]>(() => {
     if (initialCache?.datasets && initialCache.datasets.length > 0) {
-      return [...initialCache.datasets, ...SAMPLE_DATASETS];
+      return initialCache.datasets;
     }
-    return SAMPLE_DATASETS;
+    return [];
   });
   const [currentDatasetId, setCurrentDatasetId] = useState<string>(() => {
     if (initialCache?.datasets && initialCache.datasets.length > 0) {
@@ -62,24 +85,27 @@ export default function App() {
         initialCache.datasets[0];
       return preferred.id;
     }
-    return SAMPLE_DATASETS[0].id;
+    return EMPTY_WORKBOOK_PLACEHOLDER.id;
   });
 
   // Main Google Sheet Link State (No Google Sign-In)
   const [mainSheetUrl, setMainSheetUrl] = useState<string>(() => loadSavedMainSheetUrl());
   const [sheetSyncing, setSheetSyncing] = useState(false);
+  const [syncStage, setSyncStage] = useState<SheetSyncStage>('idle');
+  const [syncStageLabel, setSyncStageLabel] = useState<string>('Connecting to Google Drive workbook...');
   const [isBootstrappingSheet, setIsBootstrappingSheet] = useState<boolean>(
     () => !(initialCache?.datasets && initialCache.datasets.length > 0)
   );
   const [isSwitchingDataset, setIsSwitchingDataset] = useState(false);
   const [switchingTargetId, setSwitchingTargetId] = useState<string | null>(null);
   const switchTokenRef = useRef(0);
+  const pendingReportTabRef = useRef<'sales' | 'finance' | null>(null);
   const [sheetNotice, setSheetNotice] = useState<string | null>(null);
   const [sheetRestricted, setSheetRestricted] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(initialCache?.syncedAt || null);
 
   const currentDataset = useMemo(() => {
-    return datasets.find((d) => d.id === currentDatasetId) || datasets[0];
+    return datasets.find((d) => d.id === currentDatasetId) || datasets[0] || EMPTY_WORKBOOK_PLACEHOLDER;
   }, [datasets, currentDatasetId]);
 
   const isFinance = useMemo(() => {
@@ -89,20 +115,25 @@ export default function App() {
   const salesReportDataset = useMemo(() => {
     return (
       datasets.find(
-        (d) => !d.id.startsWith('sample-') && d.reportType !== 'finance' && !isFinanceDataset(d.columns)
-      ) ||
-      datasets.find((d) => d.reportType !== 'finance' && !isFinanceDataset(d.columns)) ||
-      datasets[0]
+        (d) =>
+          !d.id.startsWith('sample-') &&
+          d.id !== 'loading-workbook' &&
+          d.rows.length > 0 &&
+          d.reportType !== 'finance' &&
+          !isFinanceDataset(d.columns)
+      ) || null
     );
   }, [datasets]);
 
   const financeReportDataset = useMemo(() => {
     return (
       datasets.find(
-        (d) => !d.id.startsWith('sample-') && (d.reportType === 'finance' || isFinanceDataset(d.columns))
-      ) ||
-      datasets.find((d) => d.reportType === 'finance' || isFinanceDataset(d.columns)) ||
-      null
+        (d) =>
+          !d.id.startsWith('sample-') &&
+          d.id !== 'loading-workbook' &&
+          d.rows.length > 0 &&
+          (d.reportType === 'finance' || isFinanceDataset(d.columns))
+      ) || null
     );
   }, [datasets]);
 
@@ -233,16 +264,6 @@ export default function App() {
       });
     },
     [switchingTargetId, currentDataset.id, applyDatasetSelection]
-  );
-
-  const handleSelectDatasetById = useCallback(
-    (datasetId: string) => {
-      const found = datasets.find((d) => d.id === datasetId);
-      if (found) {
-        switchToDataset(found);
-      }
-    },
-    [datasets, switchToDataset]
   );
 
   // Filter state
@@ -425,24 +446,35 @@ export default function App() {
 
   // Handle adding a multi-sheet workbook cleanly (e.g. Sales Report + Finance Data)
   const handleApplyWorkbookDatasets = (incoming: Dataset[]) => {
-    if (!incoming || incoming.length === 0) return;
+    const cleanIncoming = (incoming || []).filter(
+      (d) => !d.id.startsWith('sample-') && d.id !== 'loading-workbook' && d.rows && d.rows.length > 0
+    );
+    if (cleanIncoming.length === 0) return;
 
+    const wantFinance = pendingReportTabRef.current === 'finance' || isFinance;
     const preferredNext =
-      (isFinance
-        ? incoming.find((d) => d.reportType === 'finance' || isFinanceDataset(d.columns))
-        : incoming.find((d) => d.reportType !== 'finance' && !isFinanceDataset(d.columns))) ||
-      incoming.find((d) => d.reportType !== 'finance') ||
-      incoming[0];
+      (wantFinance
+        ? cleanIncoming.find((d) => d.reportType === 'finance' || isFinanceDataset(d.columns))
+        : cleanIncoming.find((d) => d.reportType !== 'finance' && !isFinanceDataset(d.columns))) ||
+      cleanIncoming.find((d) => d.reportType !== 'finance') ||
+      cleanIncoming[0];
+    if (
+      pendingReportTabRef.current === 'finance' &&
+      (preferredNext.reportType === 'finance' || isFinanceDataset(preferredNext.columns))
+    ) {
+      pendingReportTabRef.current = null;
+    }
 
     setDatasets((prev) => {
-      const incomingIds = new Set(incoming.map((d) => d.id));
-      const isSyncedWorkbook = incoming.some((d) => d.id.startsWith('gsheet-'));
+      const incomingIds = new Set(cleanIncoming.map((d) => d.id));
+      const isSyncedWorkbook = cleanIncoming.some((d) => d.id.startsWith('gsheet-'));
       const retained = prev.filter((d) => {
+        if (d.id.startsWith('sample-') || d.id === 'loading-workbook') return false;
         if (incomingIds.has(d.id)) return false;
         if (isSyncedWorkbook && d.id.startsWith('gsheet-')) return false;
         return true;
       });
-      return [...incoming, ...retained];
+      return [...cleanIncoming, ...retained];
     });
     applyDatasetSelection(preferredNext);
   };
@@ -457,9 +489,17 @@ export default function App() {
     const cleanUrl = saveMainSheetUrl(targetUrl ?? mainSheetUrl);
     setMainSheetUrl(cleanUrl);
     setSheetSyncing(true);
+    setSyncStage('connecting');
+    setSyncStageLabel('Connecting to Google Drive workbook...');
     setSheetNotice(null);
     try {
-      const result = await fetchSheetFromLink(cleanUrl, { forceRefresh: true });
+      const result = await fetchSheetFromLink(cleanUrl, {
+        forceRefresh: true,
+        onStageChange: (stage, label) => {
+          setSyncStage(stage);
+          setSyncStageLabel(label);
+        },
+      });
       if (result.status === 'ok') {
         const synced = saveCachedDefaultSheetDatasets(result.datasets);
         setLastSyncedAt(synced);
@@ -482,6 +522,7 @@ export default function App() {
       return false;
     } finally {
       setSheetSyncing(false);
+      setSyncStage('idle');
     }
   };
 
@@ -492,20 +533,36 @@ export default function App() {
       const cached = await loadWorkbookFromIDB(mainSheetUrl);
       if (cancelled) return;
 
-      if (cached && cached.datasets.length > 0) {
-        setLastSyncedAt(cached.syncedAt || null);
+      const validCached = (cached?.datasets || []).filter(
+        (d) => !d.id.startsWith('sample-') && d.id !== 'loading-workbook' && d.rows && d.rows.length > 0
+      );
+      const hasFinanceInCache = validCached.some(
+        (d) => d.reportType === 'finance' || isFinanceDataset(d.columns)
+      );
+
+      if (validCached.length > 0) {
+        setLastSyncedAt(cached!.syncedAt || null);
         setSheetRestricted(false);
         setSheetNotice(null);
-        handleApplyWorkbookDatasets(cached.datasets);
+        handleApplyWorkbookDatasets(validCached);
         setIsBootstrappingSheet(false);
-        if (!cached.isStale) {
+        if (!cached!.isStale && hasFinanceInCache) {
           return;
         }
       }
 
       setSheetSyncing(true);
+      setSyncStage('connecting');
+      setSyncStageLabel('Connecting to live Google Drive workbook...');
       try {
-        const result = await fetchSheetFromLink(mainSheetUrl);
+        const result = await fetchSheetFromLink(mainSheetUrl, {
+          onStageChange: (stage, label) => {
+            if (!cancelled) {
+              setSyncStage(stage);
+              setSyncStageLabel(label);
+            }
+          },
+        });
         if (cancelled) return;
         if (result.status === 'ok') {
           const synced = saveCachedDefaultSheetDatasets(result.datasets);
@@ -529,6 +586,7 @@ export default function App() {
       } finally {
         if (!cancelled) {
           setSheetSyncing(false);
+          setSyncStage('idle');
           setIsBootstrappingSheet(false);
         }
       }
@@ -635,24 +693,17 @@ export default function App() {
     );
   }, [effectiveDataset]);
 
-  const headerDatasetOptions = useMemo(
-    () => datasets.map((d) => ({ id: d.id, name: d.name })),
-    [datasets]
-  );
-
   const showDashboardSkeleton =
-    isSwitchingDataset || (isBootstrappingSheet && !currentDataset.id.startsWith('gsheet-'));
+    isSwitchingDataset || (isBootstrappingSheet && currentDataset.rows.length === 0);
 
-  const isSalesTabActive = !effectiveIsFinance && effectiveDataset.id === salesReportDataset?.id;
+  const isSalesTabActive =
+    Boolean(salesReportDataset) && !effectiveIsFinance && effectiveDataset.id === salesReportDataset?.id;
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-slate-800 selection:text-white">
+    <div className="min-h-screen overflow-x-clip bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-slate-800 selection:text-white">
       {/* Top Header Bar */}
       <Header
-        currentDatasetId={effectiveDataset.id}
-        datasetOptions={headerDatasetOptions}
-        onSelectDataset={handleSelectDatasetById}
         onOpenDataModal={() => setIsDataModalOpen(true)}
         onOpenFilterSheet={() => setIsFilterSheetOpen(true)}
         onOpenMonthPicker={() => setIsMonthPickerOpen(true)}
@@ -682,6 +733,7 @@ export default function App() {
             aria-selected={isSalesTabActive}
             whileTap={{ scale: 0.985 }}
             onClick={() => {
+              pendingReportTabRef.current = null;
               if (salesReportDataset) {
                 switchToDataset(salesReportDataset);
               }
@@ -714,11 +766,22 @@ export default function App() {
             type="button"
             role="tab"
             aria-selected={effectiveIsFinance}
-            disabled={!financeReportDataset || (isBootstrappingSheet && !currentDataset.id.startsWith('gsheet-'))}
+            disabled={
+              !financeReportDataset &&
+              !sheetSyncing &&
+              !currentDataset.id.startsWith('gsheet-') &&
+              currentDataset.id !== EMPTY_WORKBOOK_PLACEHOLDER.id
+            }
             whileTap={{ scale: 0.985 }}
             onClick={() => {
               if (financeReportDataset) {
+                pendingReportTabRef.current = null;
                 switchToDataset(financeReportDataset);
+                return;
+              }
+              pendingReportTabRef.current = 'finance';
+              if (!sheetSyncing) {
+                void handleSyncSheetUrl();
               }
             }}
             className={`relative flex items-center justify-center sm:justify-between gap-2 px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed z-10 ${
@@ -738,11 +801,20 @@ export default function App() {
               <Landmark className="w-4 h-4 shrink-0" />
               <span className="truncate">Finance Report</span>
             </span>
-            {financeReportDataset && !(isBootstrappingSheet && financeReportDataset.id.startsWith('sample-')) && (
+            {financeReportDataset ? (
               <span className="hidden sm:inline-flex text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-950/60 border border-slate-800 text-slate-300 shrink-0 relative z-10">
                 {financeReportDataset.rows.length.toLocaleString('en-IN')} rows
               </span>
-            )}
+            ) : sheetSyncing ? (
+              <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-950/50 border border-cyan-800/50 text-cyan-300 shrink-0 relative z-10">
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                Loading...
+              </span>
+            ) : currentDataset.id.startsWith('gsheet-') ? (
+              <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-md bg-amber-950/50 border border-amber-700/50 text-amber-300 shrink-0 relative z-10">
+                Sync Finance
+              </span>
+            ) : null}
           </motion.button>
         </div>
 
@@ -807,6 +879,13 @@ export default function App() {
           </div>
         </div>
 
+        {/* Live Sync Progress Animation Banner (during active data sync) */}
+        <SyncProgressBanner
+          isSyncing={sheetSyncing && !showDashboardSkeleton}
+          stage={syncStage}
+          stageLabel={syncStageLabel}
+        />
+
         {showDashboardSkeleton ? (
           <DashboardSkeleton
             key="dashboard-skeleton-view"
@@ -816,9 +895,43 @@ export default function App() {
             phaseMessage={
               isSwitchingDataset
                 ? `Calculating ${effectiveDataset.name} (${effectiveDataset.rows.length.toLocaleString('en-IN')} rows)...`
-                : 'Loading live Google Sheet workbook...'
+                : syncStageLabel || 'Loading live Google Sheet workbook...'
             }
           />
+        ) : currentDataset.rows.length === 0 ? (
+          <div className="bg-slate-900/85 border border-slate-800 rounded-2xl p-6 sm:p-10 text-center space-y-4">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-slate-800/80 border border-slate-700/80 flex items-center justify-center text-emerald-400">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+            <div className="space-y-1.5 max-w-md mx-auto">
+              <h2 className="text-base sm:text-lg font-semibold text-white">
+                Waiting for Your Google Drive Workbook
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+                {sheetNotice ||
+                  'No external or sample data is connected. Click Sync Sheet below to load your Sales Report & Finance Data workbook.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => handleSyncSheetUrl()}
+                disabled={sheetSyncing}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
+              >
+                <RefreshCw className={`w-4 h-4 ${sheetSyncing ? 'animate-spin' : ''}`} />
+                <span>{sheetSyncing ? 'Syncing Sheet...' : 'Retry Sync Sheet'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsDataModalOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs sm:text-sm font-medium border border-slate-700 transition-colors cursor-pointer"
+              >
+                <Link2 className="w-4 h-4" />
+                <span>Check Sheet Link</span>
+              </button>
+            </div>
+          </div>
         ) : (
           <motion.div
             key={`dashboard-content-${currentDataset.id}`}
@@ -897,6 +1010,18 @@ export default function App() {
                   isFinance={isFinance}
                 />
               </div>
+
+              {/* Section 1B: One-vs-One Sales Comparison (GM / ASM / Branch) */}
+              <ComparisonPanel
+                isFinanceActive={isFinance}
+                activeRows={filteredRows}
+                activeCols={currentDataset.columns}
+                counterpartSalesRows={counterpartSalesRows}
+                counterpartSalesCols={salesReportDataset?.columns}
+                counterpartFinanceRows={counterpartFinanceRows}
+                counterpartFinanceCols={financeReportDataset?.columns}
+                dateRangeLabel={monthRangeDisplay}
+              />
 
               {/* Section 2: AI Sales Analysis & Future Predictions */}
               <div id="section-ai" className="scroll-mt-20">
@@ -1055,6 +1180,7 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+      <OfflineIndicator />
     </div>
     </MotionConfig>
   );

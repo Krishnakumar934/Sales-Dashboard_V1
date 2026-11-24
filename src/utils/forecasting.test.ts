@@ -5,6 +5,7 @@ import {
   buildCompactSnapshotForAI,
   buildSalesAnalyticsSnapshot,
   computeLinearForecast,
+  matchPromptEntities,
 } from './forecasting.ts';
 import type { ColumnMeta, TimeSeriesPoint } from '../types/data.ts';
 
@@ -112,4 +113,63 @@ test('buildSalesAnalyticsSnapshot extracts totals, conversion signals, high-disc
   assert.equal(compact.dataset, 'Test Store Sheet');
   assert.equal(compact.totals.sales, '₹ 2.10 Cr');
   assert.equal(compact.forecasts3Mo.length, 3);
+});
+
+test('matchPromptEntities resolves short codes like VPM to full mid-rank store names', () => {
+  const columns: ColumnMeta[] = [
+    { name: 'Date', type: 'date' },
+    { name: 'Branch', type: 'category' },
+    { name: 'GM', type: 'category' },
+    { name: 'ASM', type: 'category' },
+    { name: 'Category', type: 'category' },
+    { name: 'Amount', type: 'number' },
+    { name: 'Quantity', type: 'number' },
+    { name: 'Discount', type: 'number' },
+  ];
+
+  // Create 15 stores where Vpm-01 sits in the middle (#10) outside top 8 and bottom 5
+  const rows = [];
+  for (let i = 1; i <= 15; i++) {
+    const branchName =
+      i === 10 ? 'Vpm-01 (Nehruji Road, Vilupuram)' : `Branch-${String(i).padStart(2, '0')}`;
+    const amount = i === 10 ? 550000 : (16 - i) * 200000;
+    rows.push({
+      Date: '2026-06-15',
+      Branch: branchName,
+      GM: 'Rajesh',
+      ASM: 'Kumar',
+      Category: 'Mobiles',
+      Amount: amount,
+      Quantity: 10,
+      Discount: 15000,
+    });
+  }
+
+  const snapshot = buildSalesAnalyticsSnapshot({
+    datasetName: 'Sales Report',
+    dateRangeLabel: 'Apr 2026 – Oct 2026',
+    dateRange: { startMonth: '2026-04', endMonth: '2026-10', preset: 'all' },
+    categoryFilters: {},
+    searchQuery: '',
+    filteredRows: rows,
+    columns,
+    aggConfig: { metricCol: 'Amount', dimCol: 'Branch', dateCol: 'Date', aggType: 'sum' },
+    kpiMetrics: [
+      { id: 'kpi-amount', label: 'Total Amount', value: 24550000, formattedValue: '₹ 2.46 Cr' },
+      { id: 'kpi-quantity', label: 'Total Quantity', value: 150, formattedValue: '150' },
+      { id: 'kpi-discount', label: 'Total Discount', value: 225000, formattedValue: '₹ 2.25 L' },
+    ],
+    timeSeriesData: [{ period: '2026-06', label: 'Jun 2026', value: 24550000, count: 15 }],
+    gmShares: [{ category: 'Rajesh', value: 24550000, percentage: 100, count: 15 }],
+    asmShares: [{ category: 'Kumar', value: 24550000, percentage: 100, count: 15 }],
+  });
+
+  const matched = matchPromptEntities('How is VPM store performing this quarter?', snapshot);
+  assert.ok(matched.length >= 1);
+  assert.equal(matched[0].name, 'Vpm-01 (Nehruji Road, Vilupuram)');
+  assert.equal(matched[0].formattedValue, '₹ 5.50 L');
+
+  const compact = buildCompactSnapshotForAI(snapshot, 'Give sales analysis for VPM');
+  assert.equal(compact.promptMatchedEntities[0].name, 'Vpm-01 (Nehruji Road, Vilupuram)');
+  assert.equal(compact.allBranchesDirectory.length, 15);
 });

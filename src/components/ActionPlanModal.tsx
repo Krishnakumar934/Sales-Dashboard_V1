@@ -55,12 +55,18 @@ function findMatchedTelemetry(
   const matches = (candidate?: string) => {
     if (!candidate) return false;
     const c = candidate.trim().toLowerCase();
-    return c === needle || needle.includes(c) || c.includes(needle);
+    if (c === needle || needle.includes(c) || c.includes(needle)) return true;
+    const cFirst = c.split(/[^a-z0-9]+/)[0];
+    const nFirst = needle.split(/[^a-z0-9]+/)[0];
+    return Boolean(cFirst && nFirst && cFirst.length >= 2 && cFirst === nFirst);
   };
 
-  const entity = [...(snapshot.topEntities || []), ...(snapshot.bottomEntities || [])].find((e) =>
-    matches(e.name)
-  );
+  const entity = [
+    ...(snapshot.allEntities || []),
+    ...(snapshot.branchEntities || []),
+    ...(snapshot.topEntities || []),
+    ...(snapshot.bottomEntities || []),
+  ].find((e) => matches(e.name));
   if (entity) {
     const hierarchyParts = [
       entity.gm ? `GM: ${entity.gm}` : null,
@@ -90,6 +96,8 @@ function findMatchedTelemetry(
     ...(snapshot.gmShares || []),
     ...(snapshot.asmShares || []),
     ...(snapshot.categoryShares || []),
+    ...(snapshot.brandShares || []),
+    ...(snapshot.financierShares || []),
   ].find((s) => matches(s.name));
   if (slice) {
     return {

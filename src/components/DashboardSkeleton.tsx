@@ -1,4 +1,6 @@
 import React from 'react';
+import { motion } from 'motion/react';
+import { RefreshCw } from 'lucide-react';
 
 interface DashboardSkeletonProps {
   isFinance?: boolean;
@@ -42,6 +44,50 @@ export const DashboardSkeleton: React.FC<DashboardSkeletonProps> = ({
         {phaseMessage || `Loading and calculating ${targetLabel} panels...`}
       </span>
 
+      {/* Animated Live Sync Indicator Card */}
+      {phaseMessage && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="relative overflow-hidden rounded-2xl bg-slate-900/90 border border-emerald-500/35 px-4 py-3 shadow-md"
+        >
+          <motion.div
+            aria-hidden="true"
+            initial={{ x: '-100%' }}
+            animate={{ x: '200%' }}
+            transition={{ repeat: Infinity, duration: 1.4, ease: 'linear' }}
+            className="pointer-events-none absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-emerald-400/12 to-transparent"
+          />
+          <div className="relative z-10 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="relative w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-300 shrink-0">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs sm:text-sm font-semibold text-white truncate">
+                  {phaseMessage}
+                </div>
+                <div className="text-[11px] text-slate-400 truncate">
+                  Preparing Sales Report &amp; Finance Data panels...
+                </div>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              Syncing
+            </span>
+          </div>
+          <div className="relative z-10 mt-2.5 h-1 w-full rounded-full bg-slate-800 overflow-hidden">
+            <motion.div
+              className="h-full w-1/2 rounded-full bg-gradient-to-r from-emerald-400 via-cyan-400 to-emerald-400"
+              initial={{ x: '-100%' }}
+              animate={{ x: '220%' }}
+              transition={{ repeat: Infinity, duration: 1.2, ease: 'easeInOut' }}
+            />
+          </div>
+        </motion.div>
+      )}
+
       {/* TopBarFilters Skeleton */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-sm space-y-3.5 w-full">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
@@ -56,11 +102,6 @@ export const DashboardSkeleton: React.FC<DashboardSkeletonProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {phaseMessage && (
-              <span className="text-[11px] font-medium text-slate-300 truncate">
-                {phaseMessage}
-              </span>
-            )}
             <ShimmerBlock className="h-7 w-28 rounded-lg" />
           </div>
         </div>

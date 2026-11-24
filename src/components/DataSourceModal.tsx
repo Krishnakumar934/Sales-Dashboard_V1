@@ -227,6 +227,26 @@ export const DataSourceModal: React.FC<DataSourceModalProps> = ({
               </div>
             )}
 
+            {sheetSyncing && (
+              <div className="rounded-lg bg-slate-900/90 border border-emerald-500/35 px-3 py-2 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-emerald-300 font-medium">
+                  <span className="flex items-center gap-1.5">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>Syncing live Google Drive workbook...</span>
+                  </span>
+                  <span className="font-mono text-[10px] uppercase">Fast Sync</span>
+                </div>
+                <div className="h-1 w-full rounded-full bg-slate-800 overflow-hidden">
+                  <motion.div
+                    className="h-full w-1/2 rounded-full bg-gradient-to-r from-emerald-400 via-cyan-400 to-emerald-400"
+                    initial={{ x: '-100%' }}
+                    animate={{ x: '220%' }}
+                    transition={{ repeat: Infinity, duration: 1.15, ease: 'easeInOut' }}
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2 pt-0.5">
               <button
                 type="submit"

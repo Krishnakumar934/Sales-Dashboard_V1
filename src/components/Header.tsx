@@ -1,15 +1,8 @@
 import React from 'react';
 import { Layers, SlidersHorizontal, Smartphone, Monitor, Link2, Calendar } from 'lucide-react';
-
-interface DatasetOption {
-  id: string;
-  name: string;
-}
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface HeaderProps {
-  currentDatasetId: string;
-  datasetOptions: DatasetOption[];
-  onSelectDataset: (id: string) => void;
   onOpenDataModal: () => void;
   onOpenFilterSheet: () => void;
   onOpenMonthPicker: () => void;
@@ -20,9 +13,6 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  currentDatasetId,
-  datasetOptions,
-  onSelectDataset,
   onOpenDataModal,
   onOpenFilterSheet,
   onOpenMonthPicker,
@@ -34,35 +24,22 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-30 bg-slate-900/90 backdrop-blur-md border-b border-slate-800/90 text-white">
       <div className="max-w-7xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-2 sm:gap-4">
-        {/* Brand & Dataset Selector: ultra-compact on mobile, spacious on desktop */}
-        <div className="flex items-center gap-2 flex-1 sm:flex-initial min-w-0">
-          {/* Brand Identity */}
-          <div className="flex items-center gap-2 shrink-0">
-            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-300">
-              <Layers className="w-4 h-4" />
-            </div>
-            <h1 className="text-sm sm:text-base font-semibold tracking-tight text-white whitespace-nowrap hidden xs:inline">
+        {/* Brand Identity (Fixed Google Drive Workbook Source) */}
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-emerald-400 shrink-0">
+            <Layers className="w-4 h-4" />
+          </div>
+          <div className="flex flex-col min-w-0">
+            <h1 className="text-sm sm:text-base font-semibold tracking-tight text-white whitespace-nowrap truncate">
               PulseGrid
             </h1>
           </div>
-
-          {/* Dataset Switcher */}
-          <select
-            value={currentDatasetId}
-            onChange={(e) => onSelectDataset(e.target.value)}
-            aria-label="Select Dataset"
-            className="text-xs bg-slate-950/70 text-slate-200 border border-slate-800 hover:border-slate-700 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-slate-600 flex-1 min-w-0 w-full sm:w-auto sm:flex-initial sm:max-w-[210px] truncate cursor-pointer tactile-press"
-          >
-            {datasetOptions.map((ds) => (
-              <option key={ds.id} value={ds.id}>
-                {ds.name}
-              </option>
-            ))}
-          </select>
         </div>
 
         {/* Mobile Header Right Actions */}
         <div className="flex sm:hidden items-center gap-1.5 shrink-0">
+          <PWAInstallButton compact />
+
           <button
             type="button"
             onClick={onOpenFilterSheet}
@@ -137,6 +114,8 @@ export const Header: React.FC<HeaderProps> = ({
               </>
             )}
           </button>
+
+          <PWAInstallButton />
 
           {/* Sheet Link Primary Data Source Button */}
           <button

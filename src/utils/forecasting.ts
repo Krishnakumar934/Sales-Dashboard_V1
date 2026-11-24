@@ -13,6 +13,7 @@ import {
   cleanNumber,
   findASMCol,
   findBranchCol,
+  findBrandCol,
   findCategoryCol,
   findDiscountCol,
   findExplicitCountCol,
@@ -88,11 +89,15 @@ export interface SalesAnalyticsSnapshot {
   forecasts: ForecastPoint[];
   topEntities: EntityPerformanceSummary[];
   bottomEntities: EntityPerformanceSummary[];
+  allEntities?: EntityPerformanceSummary[];
+  branchEntities?: EntityPerformanceSummary[];
   highDiscountEntities: HighDiscountEntity[];
   conversionSignals: string[];
   gmShares: { name: string; formattedValue: string; percentage: number; count: number }[];
   asmShares: { name: string; formattedValue: string; percentage: number; count: number }[];
   categoryShares: { name: string; formattedValue: string; percentage: number; count: number }[];
+  brandShares?: { name: string; formattedValue: string; percentage: number; count: number }[];
+  financierShares?: { name: string; formattedValue: string; percentage: number; count: number }[];
 }
 
 /**
@@ -295,6 +300,7 @@ export function buildSalesAnalyticsSnapshot(params: {
   const qtyCol = findQuantityCol(columns);
   const discCol = findDiscountCol(columns);
   const catCol = findCategoryCol(columns);
+  const brandCol = findBrandCol(columns);
   const financierCol = findFinancierCol(columns);
   const branchCol = findBranchCol(columns) || aggConfig.dimCol;
   const gmCol = findGMCol(columns);
@@ -387,6 +393,30 @@ export function buildSalesAnalyticsSnapshot(params: {
       ? mappedAllEntities.slice(-5).reverse()
       : mappedAllEntities.slice().reverse().slice(0, 5);
 
+  // Always retain full branch/store breakdown even when grouped by GM/ASM/Category/Financier
+  const branchEntities: EntityPerformanceSummary[] =
+    branchCol && branchCol !== targetEntityCol
+      ? aggregateTopStores(filteredRows, branchCol, aggConfig.metricCol, 500, columns).map((s) => {
+          const disc = s.discount ?? 0;
+          const discRate = s.value > 0 ? Number(((disc / s.value) * 100).toFixed(2)) : 0;
+          const denom = Math.max(1, s.count || s.quantity || 1);
+          const ticketVal = s.value / denom;
+          return {
+            name: s.category,
+            value: s.value,
+            formattedValue: isCurrency ? formatIndianCurrency(s.value) : formatIndianCount(s.value),
+            sharePercent: totalValue > 0 ? Number(((s.value / totalValue) * 100).toFixed(1)) : s.percentage,
+            count: s.count,
+            quantity: s.quantity ?? 0,
+            discount: disc,
+            discountRatePercent: discRate,
+            avgTicketFormatted: isCurrency ? formatIndianCurrency(ticketVal) : formatIndianCount(ticketVal),
+            gm: s.gm,
+            asm: s.asm,
+          };
+        })
+      : mappedAllEntities;
+
   // High-discount leakage entities (discount rate above portfolio average, sorted by discount spend)
   const highDiscountEntities: HighDiscountEntity[] = mappedAllEntities
     .filter((e) => e.discount > 0 && e.value > 0 && e.discountRatePercent >= Math.max(0.5, discountRatePercent))
@@ -399,16 +429,36 @@ export function buildSalesAnalyticsSnapshot(params: {
       discountRatePercent: e.discountRatePercent,
     }));
 
-  // Category shares (reuses computeDashboardBundle top-8 WeakMap cache and slices to 6 in O(1))
+  // Category, Brand & Financier shares (reuses WeakMap caches where available)
   const catSlices = catCol
     ? aggregateShareByDimension(
         filteredRows,
         catCol,
         aggConfig.metricCol,
-        8,
+        15,
         explicitCountCol,
         isFinance ? 'count' : 'value'
-      ).slice(0, 6)
+      )
+    : [];
+  const brandSlices = brandCol
+    ? aggregateShareByDimension(
+        filteredRows,
+        brandCol,
+        aggConfig.metricCol,
+        15,
+        explicitCountCol,
+        isFinance ? 'count' : 'value'
+      )
+    : [];
+  const financierSlices = financierCol
+    ? aggregateShareByDimension(
+        filteredRows,
+        financierCol,
+        aggConfig.metricCol,
+        15,
+        explicitCountCol,
+        'value'
+      )
     : [];
 
   // Fallback quantity & discount checks if KPIs weren't present
@@ -496,15 +546,17 @@ export function buildSalesAnalyticsSnapshot(params: {
     forecasts,
     topEntities,
     bottomEntities,
+    allEntities: mappedAllEntities,
+    branchEntities,
     highDiscountEntities,
     conversionSignals,
-    gmShares: (gmCol ? gmShares : []).slice(0, 6).map((s) => ({
+    gmShares: (gmCol ? gmShares : []).slice(0, 15).map((s) => ({
       name: s.category,
       formattedValue: isCurrency ? formatIndianCurrency(s.value) : formatIndianCount(s.value),
       percentage: s.percentage,
       count: s.count,
     })),
-    asmShares: (asmCol ? asmShares : []).slice(0, 8).map((s) => ({
+    asmShares: (asmCol ? asmShares : []).slice(0, 20).map((s) => ({
       name: s.category,
       formattedValue: isCurrency ? formatIndianCurrency(s.value) : formatIndianCount(s.value),
       percentage: s.percentage,
@@ -516,14 +568,232 @@ export function buildSalesAnalyticsSnapshot(params: {
       percentage: s.percentage,
       count: s.count,
     })),
+    brandShares: brandSlices.map((s) => ({
+      name: s.category,
+      formattedValue: isCurrency ? formatIndianCurrency(s.value) : formatIndianCount(s.value),
+      percentage: s.percentage,
+      count: s.count,
+    })),
+    financierShares: financierSlices.map((s) => ({
+      name: s.category,
+      formattedValue: isCurrency ? formatIndianCurrency(s.value) : formatIndianCount(s.value),
+      percentage: s.percentage,
+      count: s.count,
+    })),
   };
+}
+
+export interface PromptMatchedEntity {
+  matchedType: string;
+  rank?: number;
+  totalInDimension?: number;
+  name: string;
+  formattedValue: string;
+  sharePercent: number;
+  count: number;
+  quantity?: number;
+  discountRatePercent?: number;
+  avgTicketFormatted?: string;
+  gm?: string;
+  asm?: string;
+}
+
+const PROMPT_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'about', 'from', 'into', 'this', 'that', 'these', 'those',
+  'what', 'which', 'when', 'where', 'who', 'whom', 'how', 'why', 'are', 'is', 'was', 'were',
+  'will', 'would', 'can', 'could', 'should', 'have', 'has', 'had', 'does', 'did', 'not',
+  'store', 'stores', 'branch', 'branches', 'shop', 'shops', 'show', 'give', 'tell', 'list',
+  'find', 'check', 'compare', 'versus', 'vs', 'all', 'our', 'my', 'your', 'me', 'us',
+  'sales', 'sale', 'finance', 'loan', 'amount', 'count', 'qty', 'quantity', 'discount',
+  'report', 'data', 'month', 'months', 'monthly', 'quarter', 'next', 'last', 'current',
+  'analyze', 'analysis', 'forecast', 'predict', 'prediction', 'predictions', 'performance',
+  'summary', 'details', 'detail', 'insight', 'insights', 'conversion', 'plan', 'status',
+  'good', 'bad', 'best', 'top', 'bottom', 'high', 'low', 'much', 'many', 'total', 'only',
+]);
+
+function normalizeAlphaNum(str: string): string {
+  return (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function tokenizeAlphaNum(str: string): string[] {
+  return (str || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 0);
+}
+
+function scoreEntityMatch(entityName: string, queryTokens: string[], fullQueryNorm: string): number {
+  const nameLower = (entityName || '').toLowerCase();
+  const nameNorm = normalizeAlphaNum(entityName);
+  const nameTokens = tokenizeAlphaNum(entityName);
+  if (!nameNorm || nameTokens.length === 0) return 0;
+
+  // 1. Direct full query match (excluding overly generic single words handled by queryTokens)
+  if (fullQueryNorm.length >= 3 && nameNorm === fullQueryNorm) return 100;
+
+  let bestScore = 0;
+  for (const tok of queryTokens) {
+    const tokNorm = normalizeAlphaNum(tok);
+    if (tokNorm.length < 2) continue;
+
+    // Code prefix match: e.g. "vpm" matches "Vpm-01 (Nehruji Road, Vilupuram)" first token "vpm"
+    if (nameTokens[0] === tokNorm || nameLower.startsWith(`${tokNorm}-`) || nameLower.startsWith(`${tokNorm} `)) {
+      bestScore = Math.max(bestScore, 96);
+      continue;
+    }
+
+    // Exact word token inside entity name (e.g. "vilupuram", "nehruji", "bajaj")
+    if (nameTokens.includes(tokNorm)) {
+      bestScore = Math.max(bestScore, 88);
+      continue;
+    }
+
+    // Compact code match (e.g. "vpm01" matches "vpm01nehrujiroadvilupuram")
+    if (tokNorm.length >= 3 && nameNorm.startsWith(tokNorm)) {
+      bestScore = Math.max(bestScore, 84);
+      continue;
+    }
+
+    // Substring match for tokens >= 3 chars (or 2+ char prefix on first token)
+    if (tokNorm.length >= 3 && (nameLower.includes(tokNorm) || nameNorm.includes(tokNorm))) {
+      bestScore = Math.max(bestScore, 72);
+      continue;
+    }
+
+    if (tokNorm.length >= 2 && nameTokens[0].startsWith(tokNorm)) {
+      bestScore = Math.max(bestScore, 65);
+    }
+  }
+
+  return bestScore;
+}
+
+/**
+ * Resolves store codes, abbreviations, branch names, cities, GM/ASM names, brands, categories,
+ * and financiers mentioned in a user's prompt against ALL entities in the snapshot.
+ * E.g. "VPM" matches "Vpm-01 (Nehruji Road, Vilupuram)".
+ */
+export function matchPromptEntities(
+  question: string | undefined,
+  snapshot: SalesAnalyticsSnapshot,
+  limit = 12
+): PromptMatchedEntity[] {
+  const q = (question || '').trim();
+  if (!q) return [];
+
+  const rawTokens = tokenizeAlphaNum(q);
+  const queryTokens = Array.from(
+    new Set(
+      rawTokens.filter((t) => t.length >= 2 && !PROMPT_STOP_WORDS.has(t))
+    )
+  );
+  // Also preserve compound alphanumeric tokens like "vpm01" when user typed "vpm-01"
+  for (let i = 0; i < rawTokens.length - 1; i++) {
+    if (!PROMPT_STOP_WORDS.has(rawTokens[i]) && /^\d+$/.test(rawTokens[i + 1])) {
+      queryTokens.push(`${rawTokens[i]}${rawTokens[i + 1]}`);
+    }
+  }
+
+  if (queryTokens.length === 0) return [];
+  const fullQueryNorm = normalizeAlphaNum(q);
+
+  const candidates: Array<{ score: number; item: PromptMatchedEntity }> = [];
+  const seenKeys = new Set<string>();
+
+  const pushEntityList = (list: EntityPerformanceSummary[] | undefined, typeLabel: string) => {
+    if (!Array.isArray(list)) return;
+    const total = list.length;
+    for (let i = 0; i < total; i++) {
+      const e = list[i];
+      const score = scoreEntityMatch(e.name, queryTokens, fullQueryNorm);
+      if (score <= 0) continue;
+      const key = `${typeLabel}:${e.name.toLowerCase()}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      candidates.push({
+        score,
+        item: {
+          matchedType: typeLabel,
+          rank: i + 1,
+          totalInDimension: total,
+          name: e.name,
+          formattedValue: e.formattedValue,
+          sharePercent: e.sharePercent,
+          count: e.count,
+          quantity: e.quantity,
+          discountRatePercent: e.discountRatePercent,
+          avgTicketFormatted: e.avgTicketFormatted,
+          gm: e.gm,
+          asm: e.asm,
+        },
+      });
+    }
+  };
+
+  const pushShareList = (
+    list: { name: string; formattedValue: string; percentage: number; count: number }[] | undefined,
+    typeLabel: string
+  ) => {
+    if (!Array.isArray(list)) return;
+    const total = list.length;
+    for (let i = 0; i < total; i++) {
+      const s = list[i];
+      const score = scoreEntityMatch(s.name, queryTokens, fullQueryNorm);
+      if (score <= 0) continue;
+      const key = `${typeLabel}:${s.name.toLowerCase()}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      candidates.push({
+        score,
+        item: {
+          matchedType: typeLabel,
+          rank: i + 1,
+          totalInDimension: total,
+          name: s.name,
+          formattedValue: s.formattedValue,
+          sharePercent: s.percentage,
+          count: s.count,
+        },
+      });
+    }
+  };
+
+  pushEntityList(
+    snapshot.branchEntities && snapshot.branchEntities.length > 0
+      ? snapshot.branchEntities
+      : [...(snapshot.topEntities || []), ...(snapshot.bottomEntities || [])],
+    'Branch / Store'
+  );
+  if (snapshot.allEntities && snapshot.allEntities !== snapshot.branchEntities) {
+    pushEntityList(snapshot.allEntities, snapshot.dimCol || 'Entity');
+  }
+  pushShareList(snapshot.gmShares, 'GM');
+  pushShareList(snapshot.asmShares, 'ASM');
+  pushShareList(snapshot.categoryShares, 'Category');
+  pushShareList(snapshot.brandShares, 'Brand');
+  pushShareList(snapshot.financierShares, 'Financier');
+
+  candidates.sort((a, b) => b.score - a.score || (a.item.rank ?? 999) - (b.item.rank ?? 999));
+  return candidates.slice(0, limit).map((c) => c.item);
 }
 
 /**
  * Produces a token-lean, high-signal summary object for fast Gemini inference
- * without redundant raw numbers or formatting duplicates.
+ * including prompt-matched entities and complete store/entity directories so abbreviations
+ * (like "VPM" -> "Vpm-01 (Nehruji Road, Vilupuram)") are always resolved accurately.
  */
-export function buildCompactSnapshotForAI(snapshot: SalesAnalyticsSnapshot) {
+export function buildCompactSnapshotForAI(
+  snapshot: SalesAnalyticsSnapshot,
+  question?: string
+) {
+  const promptMatchedEntities = matchPromptEntities(question, snapshot, 12);
+  const fullBranchList =
+    snapshot.branchEntities && snapshot.branchEntities.length > 0
+      ? snapshot.branchEntities
+      : snapshot.allEntities && snapshot.allEntities.length > 0
+      ? snapshot.allEntities
+      : [...(snapshot.topEntities || []), ...(snapshot.bottomEntities || [])];
+
   return {
     dataset: snapshot.datasetName,
     period: snapshot.dateRangeLabel,
@@ -531,6 +801,7 @@ export function buildCompactSnapshotForAI(snapshot: SalesAnalyticsSnapshot) {
     metric: snapshot.metricCol,
     dimension: snapshot.dimCol,
     rows: snapshot.totalRows,
+    promptMatchedEntities,
     totals: {
       sales: snapshot.formattedTotalValue,
       qty: snapshot.formattedTotalQuantity,
@@ -555,7 +826,7 @@ export function buildCompactSnapshotForAI(snapshot: SalesAnalyticsSnapshot) {
       pred: f.formattedValue,
       momPct: f.momGrowthPercent,
     })),
-    topEntities: (snapshot.topEntities || []).slice(0, 6).map((e) => ({
+    topEntities: (snapshot.topEntities || []).slice(0, 8).map((e) => ({
       name: e.name,
       val: e.formattedValue,
       sharePct: e.sharePercent,
@@ -564,7 +835,7 @@ export function buildCompactSnapshotForAI(snapshot: SalesAnalyticsSnapshot) {
       gm: e.gm,
       asm: e.asm,
     })),
-    laggingEntities: (snapshot.bottomEntities || []).slice(0, 4).map((e) => ({
+    laggingEntities: (snapshot.bottomEntities || []).slice(0, 5).map((e) => ({
       name: e.name,
       val: e.formattedValue,
       sharePct: e.sharePercent,
@@ -573,10 +844,23 @@ export function buildCompactSnapshotForAI(snapshot: SalesAnalyticsSnapshot) {
       gm: e.gm,
       asm: e.asm,
     })),
-    highDiscountTargets: (snapshot.highDiscountEntities || []).slice(0, 4),
+    allBranchesDirectory: fullBranchList.slice(0, 200).map((e, idx) => ({
+      r: idx + 1,
+      n: e.name,
+      v: e.formattedValue,
+      s: e.sharePercent,
+      c: e.count,
+      t: e.avgTicketFormatted,
+      d: e.discountRatePercent,
+      gm: e.gm,
+      asm: e.asm,
+    })),
+    highDiscountTargets: (snapshot.highDiscountEntities || []).slice(0, 5),
     signals: snapshot.conversionSignals || [],
-    gmShares: (snapshot.gmShares || []).slice(0, 5).map((g) => `${g.name}: ${g.formattedValue} (${g.percentage}%)`),
-    asmShares: (snapshot.asmShares || []).slice(0, 6).map((a) => `${a.name}: ${a.formattedValue} (${a.percentage}%)`),
-    categoryShares: (snapshot.categoryShares || []).slice(0, 5).map((c) => `${c.name}: ${c.formattedValue} (${c.percentage}%)`),
+    gmShares: (snapshot.gmShares || []).slice(0, 15).map((g) => `${g.name}: ${g.formattedValue} (${g.percentage}%)`),
+    asmShares: (snapshot.asmShares || []).slice(0, 20).map((a) => `${a.name}: ${a.formattedValue} (${a.percentage}%)`),
+    categoryShares: (snapshot.categoryShares || []).slice(0, 15).map((c) => `${c.name}: ${c.formattedValue} (${c.percentage}%)`),
+    brandShares: (snapshot.brandShares || []).slice(0, 15).map((b) => `${b.name}: ${b.formattedValue} (${b.percentage}%)`),
+    financierShares: (snapshot.financierShares || []).slice(0, 15).map((f) => `${f.name}: ${f.formattedValue} (${f.percentage}%)`),
   };
 }

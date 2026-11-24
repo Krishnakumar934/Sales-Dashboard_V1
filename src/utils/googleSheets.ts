@@ -1,6 +1,10 @@
 import type { Dataset, DataRow } from '../types/data.ts';
 import { getPrimaryAmountMetric, inferColumnTypes, isFinanceDataset } from './aggregator.ts';
 import { parseExcelWorkbookAsync } from './excelParser.ts';
+import { decodeColumnarWorkbook, type ColumnarWorkbookPayload } from './columnarPacker.ts';
+import { normalizeParsedWorkbookDatasets } from './sheetFallbackParser.ts';
+
+export type SheetSyncStage = 'idle' | 'connecting' | 'downloading' | 'parsing' | 'finalizing';
 
 export const DEFAULT_GOOGLE_SHEET_ID = '1C4h8D0EtwYpWir5o128d_L1tMNMZeDuH';
 export const DEFAULT_GOOGLE_SHEET_URL =
@@ -167,24 +171,76 @@ export type FetchSheetResult =
  */
 export async function fetchSheetFromLink(
   sheetUrlOrId = DEFAULT_GOOGLE_SHEET_URL,
-  options?: { forceRefresh?: boolean }
+  options?: {
+    forceRefresh?: boolean;
+    onStageChange?: (stage: SheetSyncStage, label: string) => void;
+  }
 ): Promise<FetchSheetResult> {
   const target = (sheetUrlOrId || '').trim() || DEFAULT_GOOGLE_SHEET_URL;
-  const res = await fetch('/api/sheets/fetch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sheetUrl: target,
-      forceRefresh: Boolean(options?.forceRefresh),
-    }),
-  });
+  options?.onStageChange?.('connecting', 'Connecting to Google Drive workbook...');
+
+  let res: Response | null = null;
+  let lastFetchErr: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetch('/api/sheets/fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sheetUrl: target,
+          forceRefresh: Boolean(options?.forceRefresh),
+          format: 'columnar',
+        }),
+      });
+      if (res.ok || (res.status >= 400 && res.status < 500)) {
+        break;
+      }
+      lastFetchErr = new Error(`Unable to fetch sheet link (HTTP ${res.status}).`);
+    } catch (err) {
+      lastFetchErr = err;
+    }
+    if (attempt === 0) {
+      options?.onStageChange?.('connecting', 'Waking server & retrying Google Drive workbook...');
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+
+  if (!res) {
+    throw lastFetchErr || new Error('Network error while connecting to Google Drive workbook.');
+  }
 
   if (!res.ok) {
     const errJson = await res.json().catch(() => ({}));
     throw new Error(errJson?.error || `Unable to fetch sheet link (HTTP ${res.status}).`);
   }
 
+  const sheetEncoding = res.headers.get('x-sheet-encoding') || '';
   const contentType = res.headers.get('content-type') || '';
+
+  if (sheetEncoding === 'columnar-v1') {
+    options?.onStageChange?.('downloading', 'Downloading compressed Sales & Finance sheets...');
+    const payload = (await res.json()) as ColumnarWorkbookPayload;
+    options?.onStageChange?.('parsing', 'Unpacking Sales Report & Finance Data...');
+    const decoded = decodeColumnarWorkbook(payload);
+    if (decoded.length === 0) {
+      throw new Error('The Google Sheet returned no valid worksheets.');
+    }
+    const resolvedSheetId = payload.sheetId || res.headers.get('x-sheet-id') || extractGoogleSheetId(target);
+    const hasFinance = decoded.some((d) => d.reportType === 'finance' || isFinanceDataset(d.columns));
+    if (resolvedSheetId === DEFAULT_GOOGLE_SHEET_ID && !hasFinance && !options?.forceRefresh) {
+      options?.onStageChange?.('connecting', 'Refreshing full Sales & Finance workbook...');
+      return fetchSheetFromLink(target, { ...options, forceRefresh: true });
+    }
+    options?.onStageChange?.('finalizing', 'Finalizing live dashboard totals...');
+    const primary = decoded.find((d) => d.reportType !== 'finance') || decoded[0];
+    return {
+      status: 'ok',
+      sheetId: resolvedSheetId,
+      dataset: primary,
+      datasets: decoded,
+    };
+  }
+
   if (contentType.includes('application/json')) {
     const json = (await res.json().catch(() => ({}))) as {
       accessible?: boolean;
@@ -200,6 +256,7 @@ export async function fetchSheetFromLink(
     };
   }
 
+  options?.onStageChange?.('downloading', 'Downloading Google Drive workbook...');
   const sheetId = res.headers.get('x-sheet-id') || extractGoogleSheetId(target);
   const sheetFormat = res.headers.get('x-sheet-format') || 'xlsx';
   const ext = sheetFormat === 'csv' ? 'csv' : 'xlsx';
@@ -207,27 +264,24 @@ export async function fetchSheetFromLink(
     sheetId === DEFAULT_GOOGLE_SHEET_ID ? 'Main Operations Sheet' : `Google Sheet (${sheetId.slice(0, 8)})`;
 
   const buffer = await res.arrayBuffer();
+  options?.onStageChange?.('parsing', 'Parsing Sales Report & Finance Data...');
   const parsedSheets = await parseExcelWorkbookAsync(buffer, `${displayName}.${ext}`);
-  const baseId = sheetId === DEFAULT_GOOGLE_SHEET_ID ? DEFAULT_SHEET_DATASET_ID : `gsheet-${sheetId}`;
+  const normalizedDatasets = normalizeParsedWorkbookDatasets(
+    parsedSheets,
+    sheetId,
+    DEFAULT_GOOGLE_SHEET_ID,
+    ext
+  );
 
-  const normalizedDatasets: Dataset[] = parsedSheets.map((ds, idx) => {
-    const slug =
-      ds.activeSheet
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '') || `sheet-${idx + 1}`;
-    const isFinance = ds.reportType === 'finance' || isFinanceDataset(ds.columns) || /finance/i.test(ds.activeSheet);
-    return {
-      ...ds,
-      id: parsedSheets.length === 1 && idx === 0 ? baseId : `${baseId}--${slug}`,
-      name: parsedSheets.length > 1 ? ds.activeSheet : displayName,
-      fileName: `${displayName}.${ext}`,
-      reportType: isFinance ? 'finance' : 'sales',
-      description: `Main Sheet Link (${ds.activeSheet}) · ${ds.rows.length.toLocaleString('en-IN')} rows`,
-    };
-  });
+  const hasFinance = normalizedDatasets.some(
+    (d) => d.reportType === 'finance' || isFinanceDataset(d.columns)
+  );
+  if (sheetId === DEFAULT_GOOGLE_SHEET_ID && !hasFinance && !options?.forceRefresh) {
+    options?.onStageChange?.('connecting', 'Refreshing full Sales & Finance workbook...');
+    return fetchSheetFromLink(target, { ...options, forceRefresh: true });
+  }
 
-  // Prefer Sales Report as primary initial dataset when both Sales & Finance exist
+  options?.onStageChange?.('finalizing', 'Finalizing live dashboard totals...');
   const primary =
     normalizedDatasets.find((d) => d.reportType !== 'finance') || normalizedDatasets[0];
 

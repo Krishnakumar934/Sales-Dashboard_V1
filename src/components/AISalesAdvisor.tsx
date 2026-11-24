@@ -15,7 +15,7 @@ import {
   Zap,
   ChevronRight,
 } from 'lucide-react';
-import type { SalesAnalyticsSnapshot } from '../utils/forecasting.ts';
+import { matchPromptEntities, type SalesAnalyticsSnapshot } from '../utils/forecasting.ts';
 import { formatIndianCurrency, formatIndianCount } from '../utils/aggregator.ts';
 import { ActionPlanModal, type AIRecommendation } from './ActionPlanModal.tsx';
 
@@ -93,6 +93,11 @@ export const AISalesAdvisor: React.FC<AISalesAdvisorProps> = ({ snapshot }) => {
   const currentContextKey = `${snapshot.datasetName}|${snapshot.dateRangeLabel}|${snapshot.activeFiltersSummary}|${snapshot.metricCol}|${snapshot.totalRows}`;
   const isStale = Boolean(analysis && lastAnalyzedKey && lastAnalyzedKey !== currentContextKey);
 
+  const promptMatches = React.useMemo(
+    () => matchPromptEntities(question, snapshot, 4),
+    [question, snapshot]
+  );
+
   // Clear stale error when dataset changes
   useEffect(() => {
     setError(null);
@@ -143,9 +148,21 @@ export const AISalesAdvisor: React.FC<AISalesAdvisorProps> = ({ snapshot }) => {
         }),
       });
 
-      const payload = await res.json().catch(() => ({}));
+      const rawText = await res.text();
+      let payload: any = {};
+      try {
+        payload = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        payload = {};
+      }
+
       if (!res.ok) {
-        throw new Error(payload?.error || `Request failed (${res.status})`);
+        throw new Error(
+          payload?.error ||
+            (res.status === 413
+              ? 'Analytics payload was too large for the request limit. Please narrow your filter and retry.'
+              : `AI request failed (HTTP ${res.status}). Please retry.`)
+        );
       }
 
       if (!payload?.analysis) {
@@ -404,6 +421,21 @@ export const AISalesAdvisor: React.FC<AISalesAdvisorProps> = ({ snapshot }) => {
               <span>Ask AI</span>
             </button>
           </form>
+
+          {promptMatches.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-300">
+              <span className="text-slate-400">Matched in sheet:</span>
+              {promptMatches.map((m) => (
+                <span
+                  key={`${m.matchedType}-${m.name}`}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-200 font-mono"
+                >
+                  <span className="truncate max-w-[220px]">{m.name}</span>
+                  <span className="text-emerald-400 font-semibold">{m.formattedValue}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Stale Filter Notice */}

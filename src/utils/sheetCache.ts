@@ -2,7 +2,7 @@ import type { Dataset, DataRow } from '../types/data.ts';
 
 const IDB_NAME = 'pulsegrid_workbook_cache_v1';
 const IDB_STORE = 'workbooks';
-const IDB_VERSION = 2;
+const IDB_VERSION = 3;
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes fresh window before background refresh
 const PACK_CHUNK_SIZE = 25000;
 
@@ -33,9 +33,10 @@ function openCacheDb(): Promise<IDBDatabase> {
     const req = window.indexedDB.open(IDB_NAME, IDB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) {
-        db.createObjectStore(IDB_STORE, { keyPath: 'cacheKey' });
+      if (db.objectStoreNames.contains(IDB_STORE)) {
+        db.deleteObjectStore(IDB_STORE);
       }
+      db.createObjectStore(IDB_STORE, { keyPath: 'cacheKey' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error || new Error('Failed to open IndexedDB cache'));
